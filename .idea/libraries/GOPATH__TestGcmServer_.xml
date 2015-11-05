@@ -73,6 +73,7 @@
       <root url="file://$PROJECT_DIR$/../Aliza/.git" />
       <root url="file://$PROJECT_DIR$/../../../google.golang.org/grpc/transport/testdata" />
       <root url="file://$PROJECT_DIR$/../../nsf/gocode/.git" />
+      <root url="file://$PROJECT_DIR$/.git" />
       <root url="file://$PROJECT_DIR$/../../../google.golang.org/appengine/.git" />
       <root url="file://$PROJECT_DIR$/../../../../../goroot/src/cmd/go/testdata" />
       <root url="file://$PROJECT_DIR$/../TestClient/.git" />
