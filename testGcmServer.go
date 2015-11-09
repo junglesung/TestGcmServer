@@ -2,145 +2,187 @@ package main
 
 import (
 	"appengine"
+	"appengine/datastore"
+	"encoding/json"
 	"io/ioutil"
 	"net/http"
-
-	"github.com/pborman/uuid"
-	gcscontext   "golang.org/x/net/context"
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
-	gcsappengine "google.golang.org/appengine"
-	gcsfile      "google.golang.org/appengine/file"
-	gcsurlfetch  "google.golang.org/appengine/urlfetch"
-	"google.golang.org/cloud"
-	"google.golang.org/cloud/storage"
+	"time"
+	_ "strings"
 )
 
+type Member struct {
+	Id string `json:"id"`
+	Token string `json:"token"`
+	Message string `json:"message"`
+	CreateTime time.Time `json:"createtime"`
+}
+
 const BaseUrl = "/api/0.1/"
+const MemberKind = "Member"
+const MemberRoot = "Member root"
 
 func init() {
 	http.HandleFunc(BaseUrl, rootPage)
-	http.HandleFunc(BaseUrl+"storeImage", storeImage)
-	http.HandleFunc(BaseUrl+"images", images)
+	http.HandleFunc(BaseUrl+"members", members)
 }
 
 func rootPage(rw http.ResponseWriter, req *http.Request) {
-	//
+	c := appengine.NewContext(req)
+	c.Debugf("This is root")
 }
 
-func images(rw http.ResponseWriter, req *http.Request) {
+func members(rw http.ResponseWriter, req *http.Request) {
 	switch req.Method {
-	// case "GET":
-		// queryImage(rw, req)
+	case "GET":
+		listMember(rw, req)
 	case "POST":
-		storeImage(rw, req)
-	// case "DELETE":
-	// 	deleteImage(rw, req)
+		addMember(rw, req)
+//	case "PUT":
+//		updateMember(rw, req)
+	case "DELETE":
+		clearMember(rw, req)
 	default:
-		// queryAll(rw, req)
+		listMember(rw, req)
 	}
 }
 
-func storeImage(rw http.ResponseWriter, req *http.Request) {
+// Register a client and reply "Hello~"
+func addMember(rw http.ResponseWriter, req *http.Request) {
 	// Appengine
-	var c appengine.Context
-	// Google Cloud Storage authentication
-	var cc gcscontext.Context
-	// Google Cloud Storage bucket name
-	var bucket string = ""
-	// User uploaded image file name
-	var fileName string = uuid.New()
-	// User uploaded image file type
-	var contentType string = ""
-	// User uploaded image file raw data
-	var b []byte
+	var c appengine.Context = appengine.NewContext(req)
 	// Result, 0: success, 1: failed
 	var r int = 0
-
-	// Set response in the end
+	var cKey *datastore.Key = nil
 	defer func() {
 		// Return status. WriteHeader() must be called before call to Write
 		if r == 0 {
 			// Changing the header after a call to WriteHeader (or Write) has no effect.
-			// rw.Header().Set("Location", req.URL.String()+"/"+cKey.Encode())
-			rw.Header().Set("Location", "http://"+bucket+".storage.googleapis.com/"+fileName)
+			rw.Header().Set("Location", req.URL.String()+"/"+cKey.Encode())
 			rw.WriteHeader(http.StatusCreated)
 		} else {
 			http.Error(rw, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		}
 	}()
 
-	// To log information in Google APP Engine console
-	c = appengine.NewContext(req)
-
 	// Get data from body
 	b, err := ioutil.ReadAll(req.Body)
 	if err != nil {
-		c.Errorf("%s in reading body", err)
+		c.Errorf("%s in reading body %s", err, b)
 		r = 1
 		return
 	}
-	c.Infof("Body length %d bytes, read %d bytes", req.ContentLength, len(b))
-
-	// Determine filename extension from content type
-	contentType = req.Header["Content-Type"][0]
-	switch contentType {
-	case "image/jpeg":
-		fileName += ".jpg"
-	default:
-		c.Errorf("Unknown or unsupported content type '%s'. Valid: image/jpeg", contentType)
+	var member Member
+	if err = json.Unmarshal(b, &member); err != nil {
+		c.Errorf("%s in decoding body %s", err, b)
 		r = 1
 		return
 	}
-	c.Infof("Content type %s is received, %s is detected.", contentType, http.DetectContentType(b))
 
-	// Get default bucket name
-	cc = gcsappengine.NewContext(req)
-	if bucket, err = gcsfile.DefaultBucketName(cc); err != nil {
-		c.Errorf("%s in getting default GCS bucket name", err)
-		r = 1
-		return
-	}
-	c.Infof("APP Engine Version: %s", gcsappengine.VersionID(cc))
-	c.Infof("Using bucket name: %s", bucket)
+	// Set now as the creation time. Precision to a second.
+	member.CreateTime = time.Unix(time.Now().Unix(), 0)
 
-	// Prepare Google Cloud Storage authentication
-	hc := &http.Client{
-		Transport: &oauth2.Transport{
-			Source: google.AppEngineTokenSource(cc, storage.ScopeFullControl),
-			// Note that the App Engine urlfetch service has a limit of 10MB uploads and
-			// 32MB downloads.
-			// See https://cloud.google.com/appengine/docs/go/urlfetch/#Go_Quotas_and_limits
-			// for more information.
-			Base: &gcsurlfetch.Transport{Context: cc},
-		},
-	}
-	ctx := cloud.NewContext(gcsappengine.AppID(cc), hc)
+	// Vernon debug
+	c.Debugf("Store member %s", b)
 
-	// Change default object ACLs
-	err = storage.PutDefaultACLRule(ctx, bucket, "allUsers", storage.RoleReader)
-	// err = storage.PutACLRule(ctx, bucket, fileName, "allUsers", storage.RoleReader)
+	// Store item into datastore
+	pKey := datastore.NewKey(c, MemberKind, MemberRoot, 0, nil)
+	cKey, err = datastore.Put(c, datastore.NewIncompleteKey(c, MemberKind, pKey), &member)
 	if err != nil {
-		c.Errorf("%v in saving ACL rule for bucket %q", err, bucket)
+		c.Errorf("%s in storing to datastore", err)
+		r = 1
+		return
+	}
+}
+
+//func queryMember(rw http.ResponseWriter, req *http.Request) {
+//	// To log messages
+//	c := appengine.NewContext(req)
+//
+//	if len(req.URL.Query()) == 0 {
+//		// Get key from URL
+//		tokens := strings.Split(req.URL.Path, "/")
+//		var keyIndexInTokens int = 0
+//		for i, v := range tokens {
+//			if v == "members" {
+//				keyIndexInTokens = i + 1
+//			}
+//		}
+//		if keyIndexInTokens >= len(tokens) {
+//			c.Debugf("Key is not given so that list all members")
+//			listMember(rw, req)
+//			return
+//		}
+//		keyString := tokens[keyIndexInTokens]
+//		if keyString == "" {
+//			c.Debugf("Key is empty so that list all members")
+//			listMember(rw, req)
+//		} else {
+//			queryOneMember(rw, req, keyString)
+//		}
+//	} else {
+//		searchMember(rw, req)
+//	}
+//}
+
+func listMember(rw http.ResponseWriter, req *http.Request) {
+	// To access datastore and to log
+	c := appengine.NewContext(req)
+	c.Debugf("listMember()")
+
+	// Get all entities
+	var dst []Member
+	r := 0
+	k, err := datastore.NewQuery(MemberKind).Order("-CreateTime").GetAll(c, &dst)
+	if err != nil {
+		c.Errorf("%s", err)
+		r = 1
+	}
+
+	// Map keys and items
+	for i, v := range k {
+		dst[i].Id = v.Encode()
+	}
+
+	// Return status. WriteHeader() must be called before call to Write
+	if r == 0 {
+		rw.WriteHeader(http.StatusOK)
+	} else {
+		http.Error(rw, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 		return
 	}
 
-	// Store file in Google Cloud Storage
-	wc := storage.NewWriter(ctx, bucket, fileName)
-	wc.ContentType = contentType
-	// wc.Metadata = map[string]string{
-	// 	"x-goog-meta-foo": "foo",
-	// 	"x-goog-meta-bar": "bar",
-	// }
-	if _, err := wc.Write(b); err != nil {
-		c.Errorf("CreateFile: unable to write data to bucket %q, file %q: %v", bucket, fileName, err)
-		r = 1
-		return
+	// Return body
+	encoder := json.NewEncoder(rw)
+	if err = encoder.Encode(dst); err != nil {
+		c.Errorf("%s in encoding result %v", err, dst)
+	} else {
+		c.Infof("listMember() returns %d members", len(dst))
 	}
-	if err := wc.Close(); err != nil {
-		c.Errorf("CreateFile: unable to close bucket %q, file %q: %v", bucket, fileName, err)
+}
+
+func clearMember(rw http.ResponseWriter, req *http.Request) {
+	// To access datastore and to log
+	c := appengine.NewContext(req)
+	c.Infof("clearMember()")
+
+	// Delete root entity after other entities
+	r := 0
+	pKey := datastore.NewKey(c, MemberKind, MemberRoot, 0, nil)
+	if keys, err := datastore.NewQuery(MemberKind).KeysOnly().GetAll(c, nil); err != nil {
+		c.Errorf("%s", err)
 		r = 1
-		return
+	} else if err := datastore.DeleteMulti(c, keys); err != nil {
+		c.Errorf("%s", err)
+		r = 1
+	} else if err := datastore.Delete(c, pKey); err != nil {
+		c.Errorf("%s", err)
+		r = 1
 	}
-	c.Infof("/%v/%v\n created", bucket, fileName)
+
+	// Return status. WriteHeader() must be called before call to Write
+	if r == 0 {
+		rw.WriteHeader(http.StatusOK)
+	} else {
+		http.Error(rw, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+	}
 }
