@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 	_ "strings"
+	"strings"
 )
 
 type Member struct {
@@ -24,6 +25,7 @@ const MemberRoot = "Member root"
 func init() {
 	http.HandleFunc(BaseUrl, rootPage)
 	http.HandleFunc(BaseUrl+"members", members)
+	http.HandleFunc(BaseUrl+"tokens/", EchoMessage)
 }
 
 func rootPage(rw http.ResponseWriter, req *http.Request) {
@@ -43,6 +45,58 @@ func members(rw http.ResponseWriter, req *http.Request) {
 		clearMember(rw, req)
 	default:
 		listMember(rw, req)
+	}
+}
+
+// Reply the received message
+// https://testgcmserver-1120.appspot.com/api/0.1/tokens/xxxxxx/messages"
+func EchoMessage(rw http.ResponseWriter, req *http.Request) {
+	// Appengine
+	var c appengine.Context
+	// Result, 0: success, 1: failed
+	var r int = 0
+
+	// Return code
+	defer func() {
+		// Return status. WriteHeader() must be called before call to Write
+		if r == 0 {
+			// Changing the header after a call to WriteHeader (or Write) has no effect.
+//			rw.Header().Set("Location", req.URL.String() + "/" + cKey.Encode())
+			rw.WriteHeader(http.StatusCreated)
+		} else {
+//			http.Error(rw, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+			http.Error(rw, "Please follow https://aaa.appspot.com/api/0.1/tokens/xxxxxx/messages", http.StatusBadRequest)
+		}
+	}()
+
+	// Parse URL into tokens
+	var tokens []string = strings.Split(req.URL.Path, "/")
+	var indexToken int = 0
+	var indexMessage int = 0
+	for i, v := range tokens {
+		if v == "tokens" {
+			indexToken = i + 1
+			indexMessage = i + 2
+			break
+		}
+	}
+
+	// Check tokens
+	if indexMessage >= len(tokens) || tokens[indexMessage] != "messages" {
+		c.Errorf("Please follow https://aaa.appspot.com/api/0.1/tokens/xxxxxx/messages")
+		r = 1
+		return
+	}
+
+	// Registration token
+	var token string = tokens[indexToken]
+
+	// Get the message from body
+	b, err := ioutil.ReadAll(req.Body)
+	if err != nil {
+		c.Errorf("%s in reading body %s", err, b)
+		r = 1
+		return
 	}
 }
 
