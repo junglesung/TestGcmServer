@@ -7,8 +7,8 @@ import (
 	"io/ioutil"
 	"net/http"
 	"time"
-	_ "strings"
 	"strings"
+	"fmt"
 )
 
 type Member struct {
@@ -18,9 +18,17 @@ type Member struct {
 	CreateTime time.Time `json:"createtime"`
 }
 
+type HelloMessage struct {
+	Message string `json:"message"`
+}
+
 const BaseUrl = "/api/0.1/"
 const MemberKind = "Member"
 const MemberRoot = "Member root"
+
+// GCM server
+const GcmURL = "https://gcm-http.googleapis.com/gcm/send"
+const GcmApiKey = "AIzaSyAODu6tKbQp8sAwEBDNLzW9uDCBmmluQ4A"
 
 func init() {
 	http.HandleFunc(BaseUrl, rootPage)
@@ -52,7 +60,7 @@ func members(rw http.ResponseWriter, req *http.Request) {
 // https://testgcmserver-1120.appspot.com/api/0.1/tokens/xxxxxx/messages"
 func EchoMessage(rw http.ResponseWriter, req *http.Request) {
 	// Appengine
-	var c appengine.Context
+	var c appengine.Context = appengine.NewContext(req)
 	// Result, 0: success, 1: failed
 	var r int = 0
 
@@ -98,6 +106,58 @@ func EchoMessage(rw http.ResponseWriter, req *http.Request) {
 		r = 1
 		return
 	}
+	var message HelloMessage
+	if err = json.Unmarshal(b, &message); err != nil {
+		c.Errorf("%s in decoding body %s", err, b)
+		r = 1
+		return
+	}
+
+	// Make GCM message body
+	var bodyString string = fmt.Sprintf(`
+		{
+			"to":"%s",
+			"notification": {
+				"body":"Body %s",
+				"title":"Title %s",
+				"icon":"ic_stat_ic_notification"
+			},
+			"data": {
+				"message":"%s"
+			}
+		}`, token, message, message, message)
+
+	// Make a POST request for GCM
+	pReq, err := http.NewRequest("POST", GcmURL, strings.NewReader(bodyString))
+	if err != nil {
+		c.Errorf("%s in makeing a HTTP request", err)
+		r = 1
+		return
+	}
+	pReq.Header.Add("Content-Type", "application/json")
+	pReq.Header.Add("Authorization", "key="+GcmApiKey)
+
+	// Send request
+	var client = &http.Client{}
+	resp, err := client.Do(pReq)
+	if err != nil {
+		c.Errorf("%s in sending request", err)
+		r = 1
+		return
+	}
+	defer resp.Body.Close()
+
+	// Check response
+	c.Infof("%d %s", resp.StatusCode, resp.Status)
+
+	// Get response body
+	respBody, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		c.Errorf("%s in reading response body", err)
+		r = 1
+		return
+	}
+	c.Infof("%s", respBody)
 }
 
 // Register a client and reply "Hello~"
