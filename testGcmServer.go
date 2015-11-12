@@ -9,6 +9,7 @@ import (
 	"time"
 	"strings"
 	"fmt"
+	"appengine/urlfetch"
 )
 
 type Member struct {
@@ -125,7 +126,8 @@ func EchoMessage(rw http.ResponseWriter, req *http.Request) {
 			"data": {
 				"message":"%s"
 			}
-		}`, token, message, message, message)
+		}`, token, message.Message, message.Message, message.Message)
+
 
 	// Make a POST request for GCM
 	pReq, err := http.NewRequest("POST", GcmURL, strings.NewReader(bodyString))
@@ -136,9 +138,11 @@ func EchoMessage(rw http.ResponseWriter, req *http.Request) {
 	}
 	pReq.Header.Add("Content-Type", "application/json")
 	pReq.Header.Add("Authorization", "key="+GcmApiKey)
+	// Debug
+	c.Infof("%s", *pReq)
 
 	// Send request
-	var client = &http.Client{}
+	var client = urlfetch.Client(c)
 	resp, err := client.Do(pReq)
 	if err != nil {
 		c.Errorf("%s in sending request", err)
