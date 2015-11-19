@@ -16,20 +16,20 @@ import (
 // HTTP body of user registration or token update
 // Datastore User Kind
 type UserRegistration struct {
-	RegistrationToken    string    `json:"registrationtoken      datastore:"-"`
-	InstanceId           string    `json:"instanceid`
-	NewRegistrationToken string    `json:"newregistrationtoken   datastore:"RegistrationToken"`
-	LastUpdateTime       time.Time `json:"lastupdatetime`
+	RegistrationToken    string    `json:"registrationtoken"      datastore:"-"`
+	InstanceId           string    `json:"instanceid"`
+	NewRegistrationToken string    `json:"newregistrationtoken"   datastore:"RegistrationToken"`
+	LastUpdateTime       time.Time `json:"lastupdatetime"`
 }
 
 // User unregistration
 type UserUnregistration struct {
-	RegistrationToken    string    `json:"registrationtoken      datastore:"-"`
-	InstanceId           string    `json:"instanceid`
+	RegistrationToken    string    `json:"registrationtoken"      datastore:"-"`
+	InstanceId           string    `json:"instanceid"`
 }
 
 type HelloMessage struct {
-	RegistrationToken    string    `json:"registrationtoken      datastore:"-"`
+	RegistrationToken    string    `json:"registrationtoken"      datastore:"-"`
 	Message              string    `json:"message"`
 }
 
@@ -43,7 +43,7 @@ const GcmApiKey = "AIzaSyAODu6tKbQp8sAwEBDNLzW9uDCBmmluQ4A"
 
 func init() {
 	http.HandleFunc(BaseUrl, rootPage)
-	http.HandleFunc(BaseUrl+"users", users)
+	http.HandleFunc(BaseUrl+"users/", users)
 	http.HandleFunc(BaseUrl+"tokens/", EchoMessage)
 }
 
@@ -175,18 +175,20 @@ func EchoMessage(rw http.ResponseWriter, req *http.Request) {
 	c.Infof("%s", respBody)
 }
 
+// Success: 204 No Content
+// Failure: 400 Bad Request
 func UpdateUser(rw http.ResponseWriter, req *http.Request) {
 	// Appengine
 	var c appengine.Context = appengine.NewContext(req)
 	// Result, 0: success, 1: failed
 	var r int = 0
-	var cKey, pKey *datastore.Key = nil, nil
+	var cKey *datastore.Key = nil
 	defer func() {
 		// Return status. WriteHeader() must be called before call to Write
 		if r == 0 {
 			// Changing the header after a call to WriteHeader (or Write) has no effect.
 			rw.Header().Set("Location", req.URL.String()+"/"+cKey.Encode())
-			rw.WriteHeader(http.StatusCreated)
+			rw.WriteHeader(http.StatusNoContent)
 		} else {
 			http.Error(rw, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		}
@@ -210,11 +212,29 @@ func UpdateUser(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Parse URL to get instance ID
+	var tokens []string = strings.Split(req.URL.Path, "/")
+	var index int = 0
+	for i, v := range tokens {
+		if v == "users" {
+			index = i + 1
+			break
+		}
+	}
+	if index >= len(tokens) {
+		c.Errorf("Please follow https://aaa.appspot.com/api/0.1/users/xxxxxx")
+		r = 1
+		return
+	}
+	user.InstanceId = tokens[index]
+
 	// Set now as the creation time. Precision to a second.
 	user.LastUpdateTime = time.Unix(time.Now().Unix(), 0)
 
 	// Search for existing user
-	pKey, err = searchUser(user, c)
+	var pKey *datastore.Key
+	var pOldUser *UserRegistration
+	pKey, pOldUser, err = searchUser(user.InstanceId, c)
 	if err != nil {
 		c.Errorf("%s in searching existing user %v", err, user)
 		r = 1
@@ -229,29 +249,31 @@ func UpdateUser(rw http.ResponseWriter, req *http.Request) {
 			r = 1
 			return
 		}
-		c.Debugf("Add user %v", user)
-	} else {
-		// Update existing user in datastore
+		c.Infof("Add user %+v", user)
+	} else if user.RegistrationToken == pOldUser.NewRegistrationToken {
+		// For security, make sure old registration token is the same as the existing entity in datastore before pdate existing user in datastore
 		cKey, err = datastore.Put(c, pKey, &user)
 		if err != nil {
 			c.Errorf("%s in storing to datastore", err)
 			r = 1
 			return
 		}
-		c.Debugf("Update user %v", user)
+		c.Infof("Update user %+v", user)
 	}
 
 }
 
-func searchUser(user UserRegistration, c appengine.Context) (key *datastore.Key, err error) {
+func searchUser(instanceId string, c appengine.Context) (key *datastore.Key, user *UserRegistration, err error) {
+	var v []UserRegistration
 	// Initial variables
 	key = nil
+	user = nil
 	err = nil
 
 	// Query
 	f := datastore.NewQuery(UserKind)
-	f = f.Filter("InstanceId=", user.InstanceId).KeysOnly()
-	k, err := f.GetAll(c, nil)
+	f = f.Filter("InstanceId=", instanceId)
+	k, err := f.GetAll(c, &v)
 	if err != nil {
 		c.Errorf("%s in getting data from datastore\n", err)
 		err = errors.New("Datastore is temporary unavailable")
@@ -263,6 +285,7 @@ func searchUser(user UserRegistration, c appengine.Context) (key *datastore.Key,
 	}
 
 	key = k[0]
+	user = &v[0]
 	return
 }
 
