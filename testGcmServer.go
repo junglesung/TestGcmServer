@@ -22,12 +22,6 @@ type UserRegistration struct {
 	LastUpdateTime       time.Time `json:"lastupdatetime"`
 }
 
-// User unregistration
-type UserUnregistration struct {
-	RegistrationToken    string    `json:"registrationtoken"      datastore:"-"`
-	InstanceId           string    `json:"instanceid"`
-}
-
 type HelloMessage struct {
 	RegistrationToken    string    `json:"registrationtoken"      datastore:"-"`
 	Message              string    `json:"message"`
@@ -57,12 +51,13 @@ func users(rw http.ResponseWriter, req *http.Request) {
 //	case "GET":
 //		listMember(rw, req)
 	// To avoid duplicate users, use PUT to search the existing one before adding a new one
-//	case "POST":
-//		addUser(rw, req)
+	case "POST":
+		SendMessage(rw, req)
 	case "PUT":
 		UpdateUser(rw, req)
 //	case "DELETE":
-//		clearMember(rw, req)
+	// Users won't delete themselves.
+	// Please write other function to clean unused users periodically.
 	default:
 		http.Error(rw, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 	}
@@ -175,6 +170,130 @@ func EchoMessage(rw http.ResponseWriter, req *http.Request) {
 	c.Infof("%s", respBody)
 }
 
+// Receive a message from an APP instance.
+// Check it's registration token.
+// Send the message back.
+// POST https://testgcmserver-1120.appspot.com/api/0.1/users/xxxxxx/messages"
+// xxxxxx: Android APP instance ID
+// Success: 204 No Content
+// Failure: 400 Bad Request, 403 Forbidden
+func SendMessage(rw http.ResponseWriter, req *http.Request) {
+	// Appengine
+	var c appengine.Context = appengine.NewContext(req)
+	// Result, 0: success, 1: failed
+	var r int = 0
+
+	// Return code
+	defer func() {
+		// Return status. WriteHeader() must be called before call to Write
+		if r == 0 {
+			// Changing the header after a call to WriteHeader (or Write) has no effect.
+			rw.WriteHeader(http.StatusNoContent)
+		} else if r == 2 {
+			http.Error(rw, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		}else {
+			//			http.Error(rw, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+			http.Error(rw, "Please follow https://aaa.appspot.com/api/0.1/tokens/xxxxxx/messages", http.StatusBadRequest)
+		}
+	}()
+
+	// Parse URL into tokens
+	var tokens []string = strings.Split(req.URL.Path, "/")
+	var indexInstanceId int = 0
+	var indexMessage int = 0
+	for i, v := range tokens {
+		if v == "users" {
+			indexInstanceId = i + 1
+			indexMessage = i + 2
+			break
+		}
+	}
+
+	// Check tokens
+	if indexMessage >= len(tokens) || tokens[indexMessage] != "messages" {
+		c.Errorf("Please follow https://aaa.appspot.com/api/0.1/users/xxxxxx/messages")
+		r = 1
+		return
+	}
+
+	// Registration token
+	var instanceId string = tokens[indexInstanceId]
+
+	// Get the message from body
+	b, err := ioutil.ReadAll(req.Body)
+	if err != nil {
+		c.Errorf("%s in reading body %s", err, b)
+		r = 1
+		return
+	}
+	var message HelloMessage
+	if err = json.Unmarshal(b, &message); err != nil {
+		c.Errorf("%s in decoding body %s", err, b)
+		r = 1
+		return
+	}
+
+	// Authenticate registration token
+	var isValid bool = false
+	isValid, err = verifyRequest(instanceId, message.RegistrationToken, c)
+	if err != nil {
+		c.Errorf("%s in authenticating request", err)
+		r = 1
+		return
+	}
+	if isValid == false {
+		c.Warningf("Invalid request, ignore")
+		r = 2
+		return
+	}
+
+	// Make GCM message body
+	var bodyString string = fmt.Sprintf(`
+		{
+			"to":"%s",
+			"data": {
+				"message":"%s"
+			}
+		}`, message.RegistrationToken, message.Message)
+
+
+	// Make a POST request for GCM
+	pReq, err := http.NewRequest("POST", GcmURL, strings.NewReader(bodyString))
+	if err != nil {
+		c.Errorf("%s in makeing a HTTP request", err)
+		r = 1
+		return
+	}
+	pReq.Header.Add("Content-Type", "application/json")
+	pReq.Header.Add("Authorization", "key="+GcmApiKey)
+	// Debug
+	c.Infof("%s", *pReq)
+
+	// Send request
+	var client = urlfetch.Client(c)
+	resp, err := client.Do(pReq)
+	if err != nil {
+		c.Errorf("%s in sending request", err)
+		r = 1
+		return
+	}
+	defer resp.Body.Close()
+
+	// Check response
+	c.Infof("%d %s", resp.StatusCode, resp.Status)
+
+	// Get response body
+	respBody, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		c.Errorf("%s in reading response body", err)
+		r = 1
+		return
+	}
+	c.Infof("%s", respBody)
+}
+
+// PUT https://testgcmserver-1120.appspot.com/api/0.1/users/xxxxxx"
+// xxxxxx: Android APP instance ID
 // Success: 204 No Content
 // Failure: 400 Bad Request
 func UpdateUser(rw http.ResponseWriter, req *http.Request) {
@@ -286,6 +405,30 @@ func searchUser(instanceId string, c appengine.Context) (key *datastore.Key, use
 
 	key = k[0]
 	user = &v[0]
+	return
+}
+
+func verifyRequest(instanceId string, registrationToken string, c appengine.Context) (isValid bool, err error) {
+	// Search for user from datastore
+	var pUser *UserRegistration
+
+	// Initial variables
+	isValid = false
+	err = nil
+
+	_, pUser, err = searchUser(instanceId, c)
+	if err != nil {
+		c.Errorf("%s in searching user %v", err, instanceId)
+		return
+	}
+
+	// Verify registration token
+	if pUser == nil || registrationToken != pUser.RegistrationToken {
+		c.Warningf("Invalid instance ID %s with registration token %s. Correct registration token should be %s",
+			instanceId, registrationToken, pUser.RegistrationToken)
+		return
+	}
+	isValid = true
 	return
 }
 
