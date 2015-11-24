@@ -13,13 +13,31 @@ import (
 	"errors"
 )
 
+// Data structure got from datastore user kind
+type User struct {
+	InstanceId           string    `json:"instanceid"`
+	RegistrationToken    string    `json:"registrationtoken"`
+	LastUpdateTime       time.Time `json:"lastupdatetime"`
+}
+
 // HTTP body of user registration or token update
 // Datastore User Kind
 type UserRegistration struct {
-	RegistrationToken    string    `json:"registrationtoken"      datastore:"-"`
+	// To authentication
 	InstanceId           string    `json:"instanceid"`
+	RegistrationToken    string    `json:"registrationtoken"      datastore:"-"`
+	// To update registration token
 	NewRegistrationToken string    `json:"newregistrationtoken"   datastore:"RegistrationToken"`
 	LastUpdateTime       time.Time `json:"lastupdatetime"`
+}
+
+// HTTP body of sending a message to a user
+type UserMessage struct {
+	// To authentication
+	InstanceId           string    `json:"instanceid"`
+	RegistrationToken    string    `json:"registrationtoken"`
+	// To the target user
+	Message              string    `json:"message"`
 }
 
 type HelloMessage struct {
@@ -191,7 +209,9 @@ func SendMessage(rw http.ResponseWriter, req *http.Request) {
 			rw.WriteHeader(http.StatusNoContent)
 		} else if r == 2 {
 			http.Error(rw, http.StatusText(http.StatusForbidden), http.StatusForbidden)
-		}else {
+		} else if r == 3 {
+			http.Error(rw, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		} else {
 			//			http.Error(rw, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 			http.Error(rw, "Please follow https://aaa.appspot.com/api/0.1/tokens/xxxxxx/messages", http.StatusBadRequest)
 		}
@@ -217,7 +237,7 @@ func SendMessage(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	// Registration token
-	var instanceId string = tokens[indexInstanceId]
+	var targetInstanceId string = tokens[indexInstanceId]
 
 	// Get the message from body
 	b, err := ioutil.ReadAll(req.Body)
@@ -226,7 +246,7 @@ func SendMessage(rw http.ResponseWriter, req *http.Request) {
 		r = 1
 		return
 	}
-	var message HelloMessage
+	var message UserMessage
 	if err = json.Unmarshal(b, &message); err != nil {
 		c.Errorf("%s in decoding body %s", err, b)
 		r = 1
@@ -235,7 +255,7 @@ func SendMessage(rw http.ResponseWriter, req *http.Request) {
 
 	// Authenticate registration token
 	var isValid bool = false
-	isValid, err = verifyRequest(instanceId, message.RegistrationToken, c)
+	isValid, err = verifyRequest(message.InstanceId, message.RegistrationToken, c)
 	if err != nil {
 		c.Errorf("%s in authenticating request", err)
 		r = 1
@@ -247,6 +267,20 @@ func SendMessage(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Search for target user's latest registration ID
+	var pUser *User
+	_, pUser, err = searchUser(targetInstanceId, c)
+	if err != nil {
+		c.Errorf("%s in searching the user %s", err, targetInstanceId)
+		r = 1
+		return
+	}
+	if pUser == nil {
+		c.Errorf("User %s doesn't exist", targetInstanceId)
+		r = 3
+		return
+	}
+
 	// Make GCM message body
 	var bodyString string = fmt.Sprintf(`
 		{
@@ -254,7 +288,7 @@ func SendMessage(rw http.ResponseWriter, req *http.Request) {
 			"data": {
 				"message":"%s"
 			}
-		}`, message.RegistrationToken, message.Message)
+		}`, pUser.RegistrationToken, message.Message)
 
 
 	// Make a POST request for GCM
@@ -352,7 +386,7 @@ func UpdateUser(rw http.ResponseWriter, req *http.Request) {
 
 	// Search for existing user
 	var pKey *datastore.Key
-	var pOldUser *UserRegistration
+	var pOldUser *User
 	pKey, pOldUser, err = searchUser(user.InstanceId, c)
 	if err != nil {
 		c.Errorf("%s in searching existing user %v", err, user)
@@ -369,7 +403,7 @@ func UpdateUser(rw http.ResponseWriter, req *http.Request) {
 			return
 		}
 		c.Infof("Add user %+v", user)
-	} else if user.RegistrationToken == pOldUser.NewRegistrationToken {
+	} else if user.RegistrationToken == pOldUser.RegistrationToken {
 		// For security, make sure old registration token is the same as the existing entity in datastore before pdate existing user in datastore
 		cKey, err = datastore.Put(c, pKey, &user)
 		if err != nil {
@@ -382,8 +416,8 @@ func UpdateUser(rw http.ResponseWriter, req *http.Request) {
 
 }
 
-func searchUser(instanceId string, c appengine.Context) (key *datastore.Key, user *UserRegistration, err error) {
-	var v []UserRegistration
+func searchUser(instanceId string, c appengine.Context) (key *datastore.Key, user *User, err error) {
+	var v []User
 	// Initial variables
 	key = nil
 	user = nil
@@ -410,7 +444,7 @@ func searchUser(instanceId string, c appengine.Context) (key *datastore.Key, use
 
 func verifyRequest(instanceId string, registrationToken string, c appengine.Context) (isValid bool, err error) {
 	// Search for user from datastore
-	var pUser *UserRegistration
+	var pUser *User
 
 	// Initial variables
 	isValid = false
