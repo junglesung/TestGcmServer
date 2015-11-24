@@ -267,7 +267,7 @@ func SendMessage(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Search for target user's latest registration ID
+	// Search for target user's latest registration token
 	var pUser *User
 	_, pUser, err = searchUser(targetInstanceId, c)
 	if err != nil {
