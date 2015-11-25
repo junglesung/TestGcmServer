@@ -20,17 +20,6 @@ type User struct {
 	LastUpdateTime       time.Time `json:"lastupdatetime"`
 }
 
-// HTTP body of user registration or token update
-// Datastore User Kind
-type UserRegistration struct {
-	// To authentication
-	InstanceId           string    `json:"instanceid"`
-	RegistrationToken    string    `json:"registrationtoken"      datastore:"-"`
-	// To update registration token
-	NewRegistrationToken string    `json:"newregistrationtoken"   datastore:"RegistrationToken"`
-	LastUpdateTime       time.Time `json:"lastupdatetime"`
-}
-
 // HTTP body of sending a message to a user
 type UserMessage struct {
 	// To authentication
@@ -51,10 +40,12 @@ const UserRoot = "User root"
 
 // GCM server
 const GcmURL = "https://gcm-http.googleapis.com/gcm/send"
+const InstanceIdVerificationUrl = "https://iid.googleapis.com/iid/info/"
 const GcmApiKey = "AIzaSyAODu6tKbQp8sAwEBDNLzW9uDCBmmluQ4A"
 
 func init() {
 	http.HandleFunc(BaseUrl, rootPage)
+	http.HandleFunc(BaseUrl+"myself", UpdateMyself)
 	http.HandleFunc(BaseUrl+"users/", users)
 	http.HandleFunc(BaseUrl+"tokens/", EchoMessage)
 }
@@ -71,8 +62,8 @@ func users(rw http.ResponseWriter, req *http.Request) {
 	// To avoid duplicate users, use PUT to search the existing one before adding a new one
 	case "POST":
 		SendMessage(rw, req)
-	case "PUT":
-		UpdateUser(rw, req)
+//	case "PUT":
+//		UpdateUser(rw, req)
 //	case "DELETE":
 	// Users won't delete themselves.
 	// Please write other function to clean unused users periodically.
@@ -330,7 +321,7 @@ func SendMessage(rw http.ResponseWriter, req *http.Request) {
 // xxxxxx: Android APP instance ID
 // Success: 204 No Content
 // Failure: 400 Bad Request
-func UpdateUser(rw http.ResponseWriter, req *http.Request) {
+func UpdateMyself(rw http.ResponseWriter, req *http.Request) {
 	// Appengine
 	var c appengine.Context = appengine.NewContext(req)
 	// Result, 0: success, 1: failed
@@ -358,28 +349,37 @@ func UpdateUser(rw http.ResponseWriter, req *http.Request) {
 	// Vernon debug
 	c.Debugf("Got body %s", b)
 
-	var user UserRegistration
+	var user User
 	if err = json.Unmarshal(b, &user); err != nil {
 		c.Errorf("%s in decoding body %s", err, b)
 		r = 1
 		return
 	}
-
-	// Parse URL to get instance ID
-	var tokens []string = strings.Split(req.URL.Path, "/")
-	var index int = 0
-	for i, v := range tokens {
-		if v == "users" {
-			index = i + 1
-			break
-		}
-	}
-	if index >= len(tokens) {
-		c.Errorf("Please follow https://aaa.appspot.com/api/0.1/users/xxxxxx")
+	if user.InstanceId == "" {
+		c.Warningf("Instance ID is empty")
 		r = 1
 		return
 	}
-	user.InstanceId = tokens[index]
+
+	// Verify authenticity
+	pClient := urlfetch.Client(c)
+	var resp http.Response
+	var sleepTime int
+	// A Google APP Engine process must end within 60 seconds. So sleep no more than 16 seconds each retry.
+	for sleepTime = 1; sleepTime <= 16; sleepTime *= 2 {
+		resp, err = pClient.Get(InstanceIdVerificationUrl + user.InstanceId)
+		if err != nil {
+			c.Errorf("%s in verifying instance ID %s", err, user.InstanceId)
+			r = 1
+			return
+		}
+		// Retry while server is temporary invalid
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	// TODO: Check response code and data
 
 	// Set now as the creation time. Precision to a second.
 	user.LastUpdateTime = time.Unix(time.Now().Unix(), 0)
@@ -412,8 +412,10 @@ func UpdateUser(rw http.ResponseWriter, req *http.Request) {
 			return
 		}
 		c.Infof("Update user %+v", user)
+	} else if user.NewRegistrationToken == pOldUser.RegistrationToken {
+		// Duplicate request. Do nothing to datastore and return existing key
+		cKey = pKey
 	}
-
 }
 
 func searchUser(instanceId string, c appengine.Context) (key *datastore.Key, user *User, err error) {
