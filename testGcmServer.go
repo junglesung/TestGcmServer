@@ -30,7 +30,7 @@ type UserMessage struct {
 }
 
 // HTTP response body from Google Instance ID authenticity service
-type InstanceIdAuthenticity struct {
+type UserRegistrationTokenAuthenticity struct {
 	Application string             `json:"application"`
 	AuthorizedEntity string        `json:"authorizedEntity"`
 	// Other properties in the response body are "don't care"
@@ -45,6 +45,7 @@ const BaseUrl = "/api/0.1/"
 const UserKind = "User"
 const UserRoot = "User root"
 const AppNamespace = "com.vernonsung.testgcmapp"
+const GaeProjectNumber = "846181647582"
 
 // GCM server
 const GcmURL = "https://gcm-http.googleapis.com/gcm/send"
@@ -363,57 +364,11 @@ func UpdateMyself(rw http.ResponseWriter, req *http.Request) {
 		r = 1
 		return
 	}
-	if user.InstanceId == "" {
-		c.Warningf("Instance ID is empty")
-		r = 1
-		return
-	}
 
-	// Verify authenticity
-	pClient := urlfetch.Client(c)
-	var resp *http.Response
-	var sleepTime int
-	// A Google APP Engine process must end within 60 seconds. So sleep no more than 16 seconds each retry.
-	for sleepTime = 1; sleepTime <= 16; sleepTime *= 2 {
-		resp, err = pClient.Get(InstanceIdVerificationUrl + user.InstanceId)
-		if err != nil {
-			c.Errorf("%s in verifying instance ID %s", err, user.InstanceId)
-			r = 1
-			return
-		}
-		// Retry while server is temporary invalid
-		if resp.StatusCode != http.StatusServiceUnavailable {
-			break
-		}
-		time.Sleep(1 * time.Second)
-	}
-
-	// Check response code
-	if resp.StatusCode != http.StatusOK {
-		c.Warningf("Invalid instance ID with response code %d %s", resp.StatusCode, resp.Status)
-		r = 1
-		return
-	}
-
-	// Get body
-	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		c.Errorf("%s in reading HTTP response body")
-		r = 1
-		return
-	}
-
-	// Decode body as JSON
-	var authenticity InstanceIdAuthenticity
-	if err := json.Unmarshal(body, &authenticity); err != nil {
-		c.Warningf("%s in decoding HTTP response body")
-		r = 1
-		return
-	}
-	if authenticity.Application != AppNamespace || authenticity.AuthorizedEntity != appengine.AppID(c) {
-		c.Warningf("Invalid instance ID with authenticity application %s and authorized entity %s",
-		           authenticity.Application, authenticity.AuthorizedEntity)
+	// Check registration token starts with instance ID. That's the rule of Google API service authenticity
+	// Also check registration token is official-signed by sending the token to Google token authenticity check service
+	if user.RegistrationToken[0:len(user.InstanceId)] != user.InstanceId || isRegistrationTokenValid(user.RegistrationToken, c) == false {
+		c.Errorf("Instance ID %s is invalid", user.InstanceId)
 		r = 1
 		return
 	}
@@ -452,6 +407,70 @@ func UpdateMyself(rw http.ResponseWriter, req *http.Request) {
 		}
 		c.Infof("Update user %+v", user)
 	}
+}
+
+// Send APP instance ID to Google server to verify its authenticity
+func isRegistrationTokenValid(token string, c appengine.Context) (isValid bool) {
+	if token == "" {
+		c.Warningf("Instance ID is empty")
+		return false
+	}
+
+	// Make a GET request for Google Instance ID service
+	pReq, err := http.NewRequest("GET", InstanceIdVerificationUrl + token, nil)
+	if err != nil {
+		c.Errorf("%s in makeing a HTTP request", err)
+		return false
+	}
+	pReq.Header.Add("Authorization", "key="+GcmApiKey)
+	// Debug
+	c.Infof("%s", *pReq)
+
+	// Send request
+	pClient := urlfetch.Client(c)
+	var resp *http.Response
+	var sleepTime int
+	// A Google APP Engine process must end within 60 seconds. So sleep no more than 16 seconds each retry.
+	for sleepTime = 1; sleepTime <= 16; sleepTime *= 2 {
+		resp, err = pClient.Do(pReq)
+		if err != nil {
+			c.Errorf("%s in verifying instance ID %s", err, token)
+			return false
+		}
+		// Retry while server is temporary invalid
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+
+	// Check response code
+	if resp.StatusCode != http.StatusOK {
+		c.Warningf("Invalid instance ID with response code %d %s", resp.StatusCode, resp.Status)
+		return false
+	}
+
+	// Get body
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		c.Errorf("%s in reading HTTP response body")
+		return false
+	}
+
+	// Decode body as JSON
+	var authenticity UserRegistrationTokenAuthenticity
+	if err := json.Unmarshal(body, &authenticity); err != nil {
+		c.Warningf("%s in decoding HTTP response body %s", body)
+		return false
+	}
+	if authenticity.Application != AppNamespace || authenticity.AuthorizedEntity != GaeProjectNumber {
+		c.Warningf("Invalid instance ID with authenticity application %s and authorized entity %s",
+			authenticity.Application, authenticity.AuthorizedEntity)
+		return false
+	}
+
+	return true
 }
 
 func searchUser(instanceId string, c appengine.Context) (key *datastore.Key, user *User, err error) {
