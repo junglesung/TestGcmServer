@@ -29,6 +29,13 @@ type UserMessage struct {
 	Message              string    `json:"message"`
 }
 
+// HTTP response body from Google Instance ID authenticity service
+type InstanceIdAuthenticity struct {
+	Application string             `json:"application"`
+	AuthorizedEntity string        `json:"authorizedEntity"`
+	// Other properties in the response body are "don't care"
+}
+
 type HelloMessage struct {
 	RegistrationToken    string    `json:"registrationtoken"      datastore:"-"`
 	Message              string    `json:"message"`
@@ -37,6 +44,7 @@ type HelloMessage struct {
 const BaseUrl = "/api/0.1/"
 const UserKind = "User"
 const UserRoot = "User root"
+const AppNamespace = "com.vernonsung.testgcmapp"
 
 // GCM server
 const GcmURL = "https://gcm-http.googleapis.com/gcm/send"
@@ -363,7 +371,7 @@ func UpdateMyself(rw http.ResponseWriter, req *http.Request) {
 
 	// Verify authenticity
 	pClient := urlfetch.Client(c)
-	var resp http.Response
+	var resp *http.Response
 	var sleepTime int
 	// A Google APP Engine process must end within 60 seconds. So sleep no more than 16 seconds each retry.
 	for sleepTime = 1; sleepTime <= 16; sleepTime *= 2 {
@@ -379,7 +387,36 @@ func UpdateMyself(rw http.ResponseWriter, req *http.Request) {
 		}
 		time.Sleep(1 * time.Second)
 	}
-	// TODO: Check response code and data
+
+	// Check response code
+	if resp.StatusCode != http.StatusOK {
+		c.Warningf("Invalid instance ID with response code %d %s", resp.StatusCode, resp.Status)
+		r = 1
+		return
+	}
+
+	// Get body
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		c.Errorf("%s in reading HTTP response body")
+		r = 1
+		return
+	}
+
+	// Decode body as JSON
+	var authenticity InstanceIdAuthenticity
+	if err := json.Unmarshal(body, &authenticity); err != nil {
+		c.Warningf("%s in decoding HTTP response body")
+		r = 1
+		return
+	}
+	if authenticity.Application != AppNamespace || authenticity.AuthorizedEntity != appengine.AppID(c) {
+		c.Warningf("Invalid instance ID with authenticity application %s and authorized entity %s",
+		           authenticity.Application, authenticity.AuthorizedEntity)
+		r = 1
+		return
+	}
 
 	// Set now as the creation time. Precision to a second.
 	user.LastUpdateTime = time.Unix(time.Now().Unix(), 0)
@@ -404,7 +441,9 @@ func UpdateMyself(rw http.ResponseWriter, req *http.Request) {
 		}
 		c.Infof("Add user %+v", user)
 	} else if user.RegistrationToken == pOldUser.RegistrationToken {
-		// For security, make sure old registration token is the same as the existing entity in datastore before pdate existing user in datastore
+		// Duplicate request. Do nothing to datastore and return existing key
+		cKey = pKey
+	} else {
 		cKey, err = datastore.Put(c, pKey, &user)
 		if err != nil {
 			c.Errorf("%s in storing to datastore", err)
@@ -412,9 +451,6 @@ func UpdateMyself(rw http.ResponseWriter, req *http.Request) {
 			return
 		}
 		c.Infof("Update user %+v", user)
-	} else if user.NewRegistrationToken == pOldUser.RegistrationToken {
-		// Duplicate request. Do nothing to datastore and return existing key
-		cKey = pKey
 	}
 }
 
