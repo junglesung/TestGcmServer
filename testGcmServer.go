@@ -41,11 +41,6 @@ type UserRegistrationResponseBody struct {
 	UserId string                  `json:"userid"`
 }
 
-type HelloMessage struct {
-	RegistrationToken    string    `json:"registrationtoken"      datastore:"-"`
-	Message              string    `json:"message"`
-}
-
 const BaseUrl = "/api/0.1/"
 const UserKind = "User"
 const UserRoot = "User root"
@@ -62,7 +57,6 @@ func init() {
 	http.HandleFunc(BaseUrl+"myself", UpdateMyself)  // PUT
 	http.HandleFunc(BaseUrl+"users/", users)
 	http.HandleFunc(BaseUrl+"user-messages", SendUserMessage)  // POST
-	http.HandleFunc(BaseUrl+"tokens/", EchoMessage)  // POST
 }
 
 func rootPage(rw http.ResponseWriter, req *http.Request) {
@@ -74,7 +68,6 @@ func users(rw http.ResponseWriter, req *http.Request) {
 	switch req.Method {
 //	case "GET":
 //		listMember(rw, req)
-	// To avoid duplicate users, use PUT to search the existing one before adding a new one
 //	case "POST":
 //		SendMessage(rw, req)
 //	case "PUT":
@@ -87,118 +80,10 @@ func users(rw http.ResponseWriter, req *http.Request) {
 	}
 }
 
-// Reply the received message
-// https://testgcmserver-1120.appspot.com/api/0.1/tokens/xxxxxx/messages"
-func EchoMessage(rw http.ResponseWriter, req *http.Request) {
-	// Appengine
-	var c appengine.Context = appengine.NewContext(req)
-	// Result, 0: success, 1: failed
-	var r int = 0
-
-	// Return code
-	defer func() {
-		// Return status. WriteHeader() must be called before call to Write
-		if r == 0 {
-			// Changing the header after a call to WriteHeader (or Write) has no effect.
-//			rw.Header().Set("Location", req.URL.String() + "/" + cKey.Encode())
-			rw.WriteHeader(http.StatusCreated)
-		} else {
-//			http.Error(rw, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
-			http.Error(rw, "Please follow https://aaa.appspot.com/api/0.1/tokens/xxxxxx/messages", http.StatusBadRequest)
-		}
-	}()
-
-	// Parse URL into tokens
-	var tokens []string = strings.Split(req.URL.Path, "/")
-	var indexToken int = 0
-	var indexMessage int = 0
-	for i, v := range tokens {
-		if v == "tokens" {
-			indexToken = i + 1
-			indexMessage = i + 2
-			break
-		}
-	}
-
-	// Check tokens
-	if indexMessage >= len(tokens) || tokens[indexMessage] != "messages" {
-		c.Errorf("Please follow https://aaa.appspot.com/api/0.1/tokens/xxxxxx/messages")
-		r = 1
-		return
-	}
-
-	// Registration token
-	var token string = tokens[indexToken]
-
-	// Get the message from body
-	b, err := ioutil.ReadAll(req.Body)
-	if err != nil {
-		c.Errorf("%s in reading body %s", err, b)
-		r = 1
-		return
-	}
-	var message HelloMessage
-	if err = json.Unmarshal(b, &message); err != nil {
-		c.Errorf("%s in decoding body %s", err, b)
-		r = 1
-		return
-	}
-
-	// Make GCM message body
-	var bodyString string = fmt.Sprintf(`
-		{
-			"to":"%s",
-			"notification": {
-				"body":"Body %s",
-				"title":"Title %s",
-				"icon":"ic_stat_ic_notification"
-			},
-			"data": {
-				"message":"%s"
-			}
-		}`, token, message.Message, message.Message, message.Message)
-
-
-	// Make a POST request for GCM
-	pReq, err := http.NewRequest("POST", GcmURL, strings.NewReader(bodyString))
-	if err != nil {
-		c.Errorf("%s in makeing a HTTP request", err)
-		r = 1
-		return
-	}
-	pReq.Header.Add("Content-Type", "application/json")
-	pReq.Header.Add("Authorization", "key="+GcmApiKey)
-	// Debug
-	c.Infof("%s", *pReq)
-
-	// Send request
-	var client = urlfetch.Client(c)
-	resp, err := client.Do(pReq)
-	if err != nil {
-		c.Errorf("%s in sending request", err)
-		r = 1
-		return
-	}
-
-	// Check response
-	c.Infof("%d %s", resp.StatusCode, resp.Status)
-
-	// Get response body
-	defer resp.Body.Close()
-	respBody, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		c.Errorf("%s in reading response body", err)
-		r = 1
-		return
-	}
-	c.Infof("%s", respBody)
-}
-
 // Receive a message from an APP instance.
-// Check it's registration token.
+// Check it's instancd ID.
 // Send the message back.
-// POST https://testgcmserver-1120.appspot.com/api/0.1/users/xxxxxx/messages"
-// xxxxxx: Android APP instance ID
+// POST https://testgcmserver-1120.appspot.com/api/0.1/user-messages"
 // Success: 204 No Content
 // Failure: 400 Bad Request, 403 Forbidden
 func SendUserMessage(rw http.ResponseWriter, req *http.Request) {
@@ -215,7 +100,7 @@ func SendUserMessage(rw http.ResponseWriter, req *http.Request) {
 			rw.WriteHeader(http.StatusNoContent)
 		} else if r == http.StatusBadRequest {
 			//			http.Error(rw, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
-			http.Error(rw, `Please follow https://aaa.appspot.com/api/0.1/user-messages\n
+			http.Error(rw, `Please follow https://aaa.appspot.com/api/0.1/user-messages
 			                {
 			                    "instanceid":""
 			                    "userid":""
@@ -317,7 +202,7 @@ func SendUserMessage(rw http.ResponseWriter, req *http.Request) {
 }
 
 // PUT https://testgcmserver-1120.appspot.com/api/0.1/myself"
-// Success: 204 No Content
+// Success: 200 OK
 // Failure: 400 Bad Request
 func UpdateMyself(rw http.ResponseWriter, req *http.Request) {
 	// Appengine
