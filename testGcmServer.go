@@ -20,15 +20,6 @@ type User struct {
 	LastUpdateTime       time.Time `json:"lastupdatetime"`
 }
 
-// HTTP body of sending a message to a user
-type UserMessage struct {
-	// To authentication
-	InstanceId           string    `json:"instanceid"`
-	// To the target user
-	UserId               string    `json:"userid"`      // Datastore user kind key string
-	Message              string    `json:"message"`
-}
-
 // HTTP response body from Google Instance ID authenticity service
 type UserRegistrationTokenAuthenticity struct {
 	Application string             `json:"application"`
@@ -41,22 +32,60 @@ type UserRegistrationResponseBody struct {
 	UserId string                  `json:"userid"`
 }
 
+// Data structure got from datastore group kind
+type Group struct {
+	Name                 string    `json:"name"`
+	Owner                string    `json:"owner"`       // Instance ID
+	Members            []string    `json:"members"`     // Instance ID list
+}
+
+// HTTP body of joining or leaving group requests from users
+type GroupUser struct {
+	// To authentication
+	InstanceId           string    `json:"instanceid"`
+	// The group
+	GroupName            string    `json:"groupname"`
+}
+
+// HTTP body of sending a message to a user
+type UserMessage struct {
+	// To authentication
+	InstanceId           string    `json:"instanceid"`
+	// To the target user
+	UserId               string    `json:"userid"`      // Datastore user kind key string
+	Message              string    `json:"message"`
+}
+
+// HTTP body of sending a message to a topic
+type TopicMessage struct {
+	// To authentication
+	InstanceId           string    `json:"instanceid"`
+	// To the target user
+	Topic                string    `json:"topic"`
+	Message              string    `json:"message"`
+}
+
 const BaseUrl = "/api/0.1/"
 const UserKind = "User"
 const UserRoot = "User root"
+const GroupKind = "Group"
+const GroupRoot = "Group root"
 const AppNamespace = "com.vernonsung.testgcmapp"
 const GaeProjectNumber = "846181647582"
 
 // GCM server
 const GcmURL = "https://gcm-http.googleapis.com/gcm/send"
+const GcmGroupURL = "https://android.googleapis.com/gcm/notification"
 const InstanceIdVerificationUrl = "https://iid.googleapis.com/iid/info/"
 const GcmApiKey = "AIzaSyAODu6tKbQp8sAwEBDNLzW9uDCBmmluQ4A"
 
 func init() {
 	http.HandleFunc(BaseUrl, rootPage)
 	http.HandleFunc(BaseUrl+"myself", UpdateMyself)  // PUT
-	http.HandleFunc(BaseUrl+"users/", users)
+	http.HandleFunc(BaseUrl+"groups/", groups)  // PUT, DELETE
 	http.HandleFunc(BaseUrl+"user-messages", SendUserMessage)  // POST
+	http.HandleFunc(BaseUrl+"topic-messages", SendTopicMessage)  // POST
+//	http.HandleFunc(BaseUrl+"group-messages", SendGroupMessage)  // POST
 }
 
 func rootPage(rw http.ResponseWriter, req *http.Request) {
@@ -64,17 +93,16 @@ func rootPage(rw http.ResponseWriter, req *http.Request) {
 	c.Debugf("This is root")
 }
 
-func users(rw http.ResponseWriter, req *http.Request) {
+func groups(rw http.ResponseWriter, req *http.Request) {
 	switch req.Method {
 //	case "GET":
 //		listMember(rw, req)
 //	case "POST":
 //		SendMessage(rw, req)
 //	case "PUT":
-//		UpdateUser(rw, req)
+//		JoinGroup(rw, req)
 //	case "DELETE":
-	// Users won't delete themselves.
-	// Please write other function to clean unused users periodically.
+//		LeaveGroup(rw, req)
 	default:
 		http.Error(rw, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 	}
@@ -163,6 +191,111 @@ func SendUserMessage(rw http.ResponseWriter, req *http.Request) {
 				"message":"%s"
 			}
 		}`, dst.RegistrationToken, message.Message)
+
+
+	// Make a POST request for GCM
+	pReq, err := http.NewRequest("POST", GcmURL, strings.NewReader(bodyString))
+	if err != nil {
+		c.Errorf("%s in makeing a HTTP request", err)
+		r = http.StatusInternalServerError
+		return
+	}
+	pReq.Header.Add("Content-Type", "application/json")
+	pReq.Header.Add("Authorization", "key="+GcmApiKey)
+	// Debug
+	c.Infof("%s", *pReq)
+
+	// Send request
+	var client = urlfetch.Client(c)
+	resp, err := client.Do(pReq)
+	if err != nil {
+		c.Errorf("%s in sending request", err)
+		r = http.StatusInternalServerError
+		return
+	}
+	defer resp.Body.Close()
+
+	// Check response
+	c.Infof("%d %s", resp.StatusCode, resp.Status)
+
+	// Get response body
+	defer resp.Body.Close()
+	respBody, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		c.Errorf("%s in reading response body", err)
+		r = http.StatusInternalServerError
+		return
+	}
+	c.Infof("%s", respBody)
+}
+
+// Receive a message from an APP instance.
+// Check it's instancd ID.
+// Send the message to the topic.
+// POST https://testgcmserver-1120.appspot.com/api/0.1/topic-messages"
+// Success: 204 No Content
+// Failure: 400 Bad Request, 403 Forbidden, 404 NotFound, 500 InternalError
+func SendTopicMessage(rw http.ResponseWriter, req *http.Request) {
+	// Appengine
+	var c appengine.Context = appengine.NewContext(req)
+	// Result, 0: success, 1: failed
+	var r int = http.StatusNoContent
+
+	// Return code
+	defer func() {
+		// Return status. WriteHeader() must be called before call to Write
+		if r == http.StatusNoContent {
+			// Changing the header after a call to WriteHeader (or Write) has no effect.
+			rw.WriteHeader(http.StatusNoContent)
+		} else if r == http.StatusBadRequest {
+			//			http.Error(rw, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+			http.Error(rw, `Please follow https://aaa.appspot.com/api/0.1/topic-messages
+			                {
+			                    "instanceid":""
+			                    "topic":""
+			                    "message":""
+			                }`, http.StatusBadRequest)
+		} else {
+			http.Error(rw, http.StatusText(r), r)
+		}
+	}()
+
+	// Get body
+	b, err := ioutil.ReadAll(req.Body)
+	if err != nil {
+		c.Errorf("%s in reading body %s", err, b)
+		r = http.StatusBadRequest
+		return
+	}
+	var message TopicMessage
+	if err = json.Unmarshal(b, &message); err != nil {
+		c.Errorf("%s in decoding body %s", err, b)
+		r = http.StatusBadRequest
+		return
+	}
+
+	// Authenticate registration token
+	var isValid bool = false
+	isValid, err = verifyRequest(message.InstanceId, c)
+	if err != nil {
+		c.Errorf("%s in authenticating request", err)
+		r = http.StatusBadRequest
+		return
+	}
+	if isValid == false {
+		c.Warningf("Invalid request, ignore")
+		r = http.StatusForbidden
+		return
+	}
+
+	// Make GCM message body
+	var bodyString string = fmt.Sprintf(`
+		{
+			"to":"/topics/%s",
+			"data": {
+				"message":"%s"
+			}
+		}`, message.Topic, message.Message)
 
 
 	// Make a POST request for GCM
