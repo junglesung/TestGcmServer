@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"appengine/urlfetch"
 	"errors"
+	"bytes"
 )
 
 // Data structure got from datastore user kind
@@ -37,6 +38,7 @@ type Group struct {
 	Name                 string    `json:"name"`
 	Owner                string    `json:"owner"`       // Instance ID
 	Members            []string    `json:"members"`     // Instance ID list
+	NotificationKey      string    `json:"notificationkey"`  // GCM device group unique ID
 }
 
 // HTTP body of joining or leaving group requests from users
@@ -45,6 +47,20 @@ type GroupUser struct {
 	InstanceId           string    `json:"instanceid"`
 	// The group
 	GroupName            string    `json:"groupname"`
+}
+
+// HTTP body to send to Google Cloud Messaging server to manage device groups
+type GroupOperation struct {
+	Operation            string    `json:"operation"`              // "create", "add", "remove"
+	Notification_key_name string   `json:"notification_key_name"`  // A unique group name in a Google project
+	Notification_key     string    `json:"notification_key,omitempty"`       // A unique key to identify a group
+	Registration_ids   []string    `json:"registration_ids"`       // APP registration tokens in the group
+}
+
+// HTTP body received from Google Cloud Messaging server
+type GroupOperationResponse struct {
+	Notification_key     string    `json:"notification_key"`       // A unique key to identify a group
+	Error                string    `json:"error"`                  // Error message
 }
 
 // HTTP body of sending a message to a user
@@ -71,6 +87,7 @@ const UserRoot = "User root"
 const GroupKind = "Group"
 const GroupRoot = "Group root"
 const AppNamespace = "com.vernonsung.testgcmapp"
+const GaeProjectId = "testgcmserver-1120"
 const GaeProjectNumber = "846181647582"
 
 // GCM server
@@ -82,7 +99,7 @@ const GcmApiKey = "AIzaSyAODu6tKbQp8sAwEBDNLzW9uDCBmmluQ4A"
 func init() {
 	http.HandleFunc(BaseUrl, rootPage)
 	http.HandleFunc(BaseUrl+"myself", UpdateMyself)  // PUT
-	http.HandleFunc(BaseUrl+"groups/", groups)  // PUT, DELETE
+	http.HandleFunc(BaseUrl+"groups", groups)  // PUT, DELETE
 	http.HandleFunc(BaseUrl+"user-messages", SendUserMessage)  // POST
 	http.HandleFunc(BaseUrl+"topic-messages", SendTopicMessage)  // POST
 //	http.HandleFunc(BaseUrl+"group-messages", SendGroupMessage)  // POST
@@ -99,8 +116,8 @@ func groups(rw http.ResponseWriter, req *http.Request) {
 //		listMember(rw, req)
 //	case "POST":
 //		SendMessage(rw, req)
-//	case "PUT":
-//		JoinGroup(rw, req)
+	case "PUT":
+		JoinGroup(rw, req)
 //	case "DELETE":
 //		LeaveGroup(rw, req)
 	default:
@@ -153,7 +170,7 @@ func SendUserMessage(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Authenticate registration token
+	// Authenticate sender
 	var isValid bool = false
 	isValid, err = verifyRequest(message.InstanceId, c)
 	if err != nil {
@@ -274,7 +291,7 @@ func SendTopicMessage(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Authenticate registration token
+	// Authenticate sender
 	var isValid bool = false
 	isValid, err = verifyRequest(message.InstanceId, c)
 	if err != nil {
@@ -420,6 +437,209 @@ func UpdateMyself(rw http.ResponseWriter, req *http.Request) {
 	}
 }
 
+// PUT https://testgcmserver-1120.appspot.com/api/0.1/groups"
+// Success: 204 No Content
+// Failure: 400 Bad Request, 403 Forbidden, 500 Internal Server Error
+func JoinGroup(rw http.ResponseWriter, req *http.Request) {
+	// Appengine
+	var c appengine.Context = appengine.NewContext(req)
+	// Result, 0: success, 1: failed
+	var r int = http.StatusNoContent
+	var cKey *datastore.Key = nil
+	defer func() {
+		if r == http.StatusNoContent {
+			// Changing the header after a call to WriteHeader (or Write) has no effect.
+			rw.Header().Set("Location", req.URL.String()+"/"+cKey.Encode())
+			// Return status. WriteHeader() must be called before call to Write
+			rw.WriteHeader(r)
+		} else {
+			http.Error(rw, http.StatusText(r), r)
+		}
+	}()
+
+	// Get data from body
+	b, err := ioutil.ReadAll(req.Body)
+	if err != nil {
+		c.Errorf("%s in reading body %s", err, b)
+		r = http.StatusInternalServerError
+		return
+	}
+
+	// Vernon debug
+	c.Debugf("Got body %s", b)
+
+	var user GroupUser
+	if err = json.Unmarshal(b, &user); err != nil {
+		c.Errorf("%s in decoding body %s", err, b)
+		r = http.StatusBadRequest
+		return
+	}
+
+	// Authenticate sender
+	var isValid bool = false
+	isValid, err = verifyRequest(user.InstanceId, c)
+	if err != nil {
+		c.Errorf("%s in authenticating request", err)
+		r = http.StatusBadRequest
+		return
+	}
+	if isValid == false {
+		c.Warningf("Invalid request, ignore")
+		r = http.StatusForbidden
+		return
+	}
+
+	// Search for user registration token
+	var pUser *User
+	var token string
+	_, pUser, err = searchUser(user.InstanceId, c)
+	if err != nil {
+		c.Errorf("%s in searching user %v", err, user.InstanceId)
+		r = http.StatusInternalServerError
+		return
+	}
+	if pUser == nil {
+		c.Errorf("User %s not found", err, user.InstanceId)
+		r = http.StatusNotFound
+		return
+	}
+	token = pUser.RegistrationToken
+
+	// Search for existing group
+	var pKey *datastore.Key
+	var pGroup *Group
+	pKey, pGroup, err = searchGroup(user.GroupName, c)
+	if err != nil {
+		c.Errorf("%s in searching existing group %s", err, user.GroupName)
+		r = http.StatusInternalServerError
+		return
+	}
+
+	// Make GCM message body
+	var operation GroupOperation
+	if pKey == nil {
+		// Create a new group on GCM server
+		operation.Operation = "create"
+		operation.Notification_key_name = user.GroupName
+		operation.Registration_ids = []string{token}
+		if r = sendGroupOperationToGcm(&operation, c); r != http.StatusOK {
+			c.Errorf("Send group operation to GCM failed")
+			return
+		}
+		r = http.StatusNoContent
+
+		// Add new group to the datastore
+		pGroup = &Group {
+			Name: user.GroupName,
+			Owner: user.InstanceId,
+			Members: []string {user.InstanceId},
+			NotificationKey: operation.Notification_key,
+		}
+		pKey = datastore.NewKey(c, GroupKind, GroupRoot, 0, nil)
+		cKey, err = datastore.Put(c, datastore.NewIncompleteKey(c, GroupKind, pKey), pGroup)
+		if err != nil {
+			c.Errorf("%s in storing to datastore", err)
+			r = http.StatusInternalServerError
+			return
+		}
+		c.Infof("Add group %+v", pGroup)
+	} else {
+		// Add the new user to the existing group on GCM server
+		operation.Operation = "add"
+		operation.Notification_key_name = user.GroupName
+		operation.Notification_key = pGroup.NotificationKey
+		operation.Registration_ids = []string{token}
+		if r = sendGroupOperationToGcm(&operation, c); r != http.StatusOK {
+			c.Errorf("Send group operation to GCM failed")
+			return
+		}
+		r = http.StatusNoContent
+
+		// Modify datastore
+		pGroup.Members = append(pGroup.Members, token)
+		cKey, err = datastore.Put(c, pKey, pGroup)
+		if err != nil {
+			c.Errorf("%s in storing to datastore", err)
+			r = http.StatusInternalServerError
+			return
+		}
+		c.Infof("Add user %s to group %s", user.InstanceId, user.GroupName)
+	}
+}
+
+// Send a Google Cloud Messaging Device Group operation to GCM server
+// Success: 200 OK. Store the notification key from server to the operation structure
+// Failure: 400 Bad Request, 403 Forbidden, 500 Internal Server Error
+func sendGroupOperationToGcm(pOperation *GroupOperation, c appengine.Context) (r int) {
+	// Initial variables
+	var err error = nil
+	r = http.StatusOK
+
+	// Check parameters
+	if pOperation == nil {
+		c.Errorf("Parameter pOperation is nil")
+		r = http.StatusInternalServerError
+		return
+	}
+
+	// Make a POST request for GCM
+	var b []byte
+	b, err = json.Marshal(pOperation)
+	if err != nil {
+		c.Errorf("%s in encoding an operation as JSON", err)
+		r = http.StatusBadRequest
+		return
+	}
+	pReq, err := http.NewRequest("POST", GcmGroupURL, bytes.NewReader(b))
+	if err != nil {
+		c.Errorf("%s in makeing a HTTP request", err)
+		r = http.StatusInternalServerError
+		return
+	}
+	pReq.Header.Add("Content-Type", "application/json")
+	pReq.Header.Add("Authorization", "key="+GcmApiKey)
+	pReq.Header.Add("project_id", GaeProjectNumber)
+	// Debug
+	c.Infof("%s", *pReq)
+
+	// Send request
+	var client = urlfetch.Client(c)
+	resp, err := client.Do(pReq)
+	if err != nil {
+		c.Errorf("%s in sending request", err)
+		r = http.StatusInternalServerError
+		return
+	}
+
+	// Get response body
+	var respBody GroupOperationResponse
+	defer resp.Body.Close()
+	b, err = ioutil.ReadAll(resp.Body)
+	if err != nil {
+		c.Errorf("%s in reading response body", err)
+		r = http.StatusInternalServerError
+		return
+	}
+	c.Infof("%s", b)
+	if err = json.Unmarshal(b, &respBody); err != nil {
+		c.Errorf("%s in decoding JSON response body", err)
+		r = http.StatusInternalServerError
+		return
+	}
+
+	// Check response
+	c.Infof("%d %s", resp.StatusCode, resp.Status)
+	if resp.StatusCode == http.StatusOK {
+		// Success. Write Notification Key to operation structure
+		pOperation.Notification_key = respBody.Notification_key
+		return
+	} else {
+		c.Errorf("GCM server replied that %s", respBody.Error)
+		r = http.StatusBadRequest
+		return
+	}
+}
+
 // Send APP instance ID to Google server to verify its authenticity
 func isRegistrationTokenValid(token string, c appengine.Context) (isValid bool) {
 	if token == "" {
@@ -507,6 +727,32 @@ func searchUser(instanceId string, c appengine.Context) (key *datastore.Key, use
 
 	key = k[0]
 	user = &v[0]
+	return
+}
+
+func searchGroup(name string, c appengine.Context) (key *datastore.Key, group *Group, err error) {
+	var v []Group
+	// Initial variables
+	key = nil
+	group = nil
+	err = nil
+
+	// Query
+	f := datastore.NewQuery(GroupKind)
+	f = f.Filter("Name=", name)
+	k, err := f.GetAll(c, &v)
+	if err != nil {
+		c.Errorf("%s in getting data from datastore\n", err)
+		err = errors.New("Datastore is temporary unavailable")
+		return
+	}
+
+	if k == nil || len(k) == 0 {
+		return
+	}
+
+	key = k[0]
+	group = &v[0]
 	return
 }
 
