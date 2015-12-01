@@ -475,21 +475,7 @@ func JoinGroup(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Authenticate sender
-	var isValid bool = false
-	isValid, err = verifyRequest(user.InstanceId, c)
-	if err != nil {
-		c.Errorf("%s in authenticating request", err)
-		r = http.StatusBadRequest
-		return
-	}
-	if isValid == false {
-		c.Warningf("Invalid request, ignore")
-		r = http.StatusForbidden
-		return
-	}
-
-	// Search for user registration token
+	// Authenticate sender & Search for user registration token
 	var pUser *User
 	var token string
 	_, pUser, err = searchUser(user.InstanceId, c)
@@ -499,8 +485,8 @@ func JoinGroup(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if pUser == nil {
-		c.Errorf("User %s not found", err, user.InstanceId)
-		r = http.StatusNotFound
+		c.Errorf("User %s not found. Invalid request. Ignore.", user.InstanceId)
+		r = http.StatusForbidden
 		return
 	}
 	token = pUser.RegistrationToken
@@ -564,6 +550,142 @@ func JoinGroup(rw http.ResponseWriter, req *http.Request) {
 			return
 		}
 		c.Infof("Add user %s to group %s", user.InstanceId, user.GroupName)
+	}
+}
+
+// DELETE https://testgcmserver-1120.appspot.com/api/0.1/groups"
+// Success: 204 No Content
+// Failure: 400 Bad Request, 403 Forbidden, 500 Internal Server Error
+func LeaveGroup(rw http.ResponseWriter, req *http.Request) {
+	// Appengine
+	var c appengine.Context = appengine.NewContext(req)
+	// Result, 0: success, 1: failed
+	var r int = http.StatusNoContent
+	// GCM server group operation
+	var operation GroupOperation
+	defer func() {
+		if r == http.StatusNoContent {
+			// Return status. WriteHeader() must be called before call to Write
+			rw.WriteHeader(r)
+		} else {
+			http.Error(rw, http.StatusText(r), r)
+		}
+	}()
+
+	// Get data from body
+	b, err := ioutil.ReadAll(req.Body)
+	if err != nil {
+		c.Errorf("%s in reading body %s", err, b)
+		r = http.StatusInternalServerError
+		return
+	}
+
+	// Vernon debug
+	c.Debugf("Got body %s", b)
+
+	var user GroupUser
+	if err = json.Unmarshal(b, &user); err != nil {
+		c.Errorf("%s in decoding body %s", err, b)
+		r = http.StatusBadRequest
+		return
+	}
+
+	// Authenticate sender & Search for user registration token
+	var pUser *User
+	var token string
+	_, pUser, err = searchUser(user.InstanceId, c)
+	if err != nil {
+		c.Errorf("%s in searching user %v", err, user.InstanceId)
+		r = http.StatusInternalServerError
+		return
+	}
+	if pUser == nil {
+		c.Errorf("User %s not found. Invalid request. Ignore.", user.InstanceId)
+		r = http.StatusForbidden
+		return
+	}
+	token = pUser.RegistrationToken
+
+	// Search for existing group
+	var cKey *datastore.Key
+	var pGroup *Group
+	cKey, pGroup, err = searchGroup(user.GroupName, c)
+	if err != nil {
+		c.Errorf("%s in searching existing group %s", err, user.GroupName)
+		r = http.StatusInternalServerError
+		return
+	}
+	if cKey == nil {
+		c.Warningf("Group %s not found.", user.GroupName)
+		r = http.StatusBadRequest
+		return
+	}
+
+	var returnCode int = http.StatusOK
+	if pUser.InstanceId == pGroup.Owner {
+		// Remove all user from GCM server so that the group will be removed at the same time
+		for _, v := range pGroup.Members {
+			// Search user registration token
+			_, pUser, err = searchUser(v, c)
+			if err != nil {
+				c.Warningf("%s in searching user %v", err, v)
+				continue
+			}
+			if pUser == nil {
+				c.Warningf("User %s not found. Ignore.", v)
+				continue
+			}
+			token = pUser.RegistrationToken
+
+			// Make operation structure
+			operation.Operation = "remove"
+			operation.Notification_key_name = pGroup.Name
+			operation.Notification_key = pGroup.NotificationKey
+			operation.Registration_ids = []string{token}
+			if returnCode = sendGroupOperationToGcm(&operation, c); returnCode != http.StatusOK {
+				c.Warningf("Failed to remove user %s from group %s because sending group operation to GCM failed", v, user.GroupName)
+				r = returnCode
+				continue
+			}
+		}
+
+		// Modify datastore
+		if err = datastore.Delete(c, cKey); err != nil {
+			c.Errorf("%s in delete group %s from datastore", err, user.GroupName)
+			r = http.StatusInternalServerError
+			return
+		}
+		c.Infof("User %s removed group %s", user.InstanceId, user.GroupName)
+	} else {
+		// Remove the user from the existing group on GCM server
+		operation.Operation = "remove"
+		operation.Notification_key_name = user.GroupName
+		operation.Notification_key = pGroup.NotificationKey
+		operation.Registration_ids = []string{token}
+		if returnCode = sendGroupOperationToGcm(&operation, c); returnCode != http.StatusOK {
+			c.Errorf("Send group operation to GCM failed")
+			r = returnCode
+			return
+		}
+
+		// Modify datastore
+		a := pGroup.Members
+		for i, x := range a {
+			if x == user.InstanceId {
+				a[i] = a[len(a)-1]
+				a[len(a)-1] = ""
+				a = a[:len(a)-1]
+				break
+			}
+		}
+		pGroup.Members = a
+		cKey, err = datastore.Put(c, cKey, pGroup)
+		if err != nil {
+			c.Errorf("%s in storing to datastore", err)
+			r = http.StatusInternalServerError
+			return
+		}
+		c.Infof("Remove user %s from group %s", user.InstanceId, user.GroupName)
 	}
 }
 
